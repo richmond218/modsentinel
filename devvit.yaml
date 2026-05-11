@@ -1,0 +1,28 @@
+# ModSentinel — Devvit app manifest
+#
+# After running `devvit new` for the first time, replace the `name`,
+# `slug`, and `version` fields below with the values Reddit assigns to
+# your app. The rest of this file is the canonical configuration.
+
+name: modsentinel
+slug: modsentinel
+version: 0.1.0
+
+# Where Devvit looks for the entry point — matches src/main.ts default
+entrypoint: src/main.ts
+
+# Required capabilities. ModSentinel needs:
+#   - reddit:read+write — to read post/comment bodies and submit reports to mod queue
+#   - redis — for the audit log
+#   - http — to call api.anthropic.com from inside the trigger
+#   - mod_actions — to act on the mod queue
+permissions:
+  reddit:
+    read: true
+    write: true
+  redis: true
+  http:
+    enabled: true
+    domains:
+      - api.anthropic.com
+  mod_actions: true
