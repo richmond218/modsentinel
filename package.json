@@ -1,9 +1,9 @@
 {
-  "name": "modsentinel",
-  "version": "0.1.0",
+  "name": "modsentinels",
+  "version": "0.0.0",
   "private": true,
   "description": "AI rule-violation pre-screener for Reddit moderators. Devvit app that uses Claude to flag rule-violating posts to mod queue with reasoning.",
-  "license": "MIT",
+  "license": "BSD-3-Clause",
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -16,7 +16,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@devvit/public-api": "^0.12.22",
+    "@devvit/public-api": "0.12.22",
     "zod": "^3.23.8"
   },
   "devDependencies": {

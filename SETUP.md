@@ -64,7 +64,7 @@ devvit new --force
 ```
 
 The wizard will ask:
-- App name → enter `modsentinel`
+- App name → enter `modsentinels`
 - Template → choose `blank` (we already have all our code)
 
 Important: this step renames or overwrites our `devvit.yaml`. After it finishes, **diff to make sure our permissions are still set**:
@@ -77,7 +77,7 @@ If the new `devvit.yaml` is missing our `http.domains: [api.anthropic.com]` entr
 ## Step 5 — Test subreddit
 
 In a browser, go to https://www.reddit.com/subreddits/create and create a new sub. Recommend:
-- Name: `r/modsentinel_test` (or any unused name)
+- Name: `r/modsentinels_test` (or any unused name)
 - Type: **Private** (only you can see it — perfect for testing)
 - Topic: Any (Programming works)
 
@@ -86,7 +86,7 @@ You're the only mod, so you can post anything. **You need to be a mod** of any s
 ## Step 6 — `devvit playtest`
 
 ```bash
-devvit playtest modsentinel_test
+devvit playtest modsentinels_test
 ```
 
 This deploys ModSentinel to your test sub in dev mode and tails logs. Open another terminal pane to read the log stream.
