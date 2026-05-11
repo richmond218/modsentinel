@@ -9,6 +9,7 @@
  * single shape.
  */
 
+import { SettingScope } from "@devvit/public-api";
 import type { SubredditConfig } from "./types.js";
 
 export type SettingsKey =
@@ -92,6 +93,7 @@ export const SETTING_DEFINITIONS = [
     label: "Claude API key",
     type: "string" as const,
     isSecret: true,
+    scope: SettingScope.App,
     required: true,
     helpText:
       "Anthropic API key (starts with sk-ant-...). ModSentinel uses this to classify content against your rules.",
