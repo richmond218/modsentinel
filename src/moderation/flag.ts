@@ -45,17 +45,22 @@ export async function maybeFlag(
   return true;
 }
 
+/** Reddit rejects report reasons longer than 100 characters. */
+export const MAX_REPORT_REASON_CHARS = 100;
+
 /**
- * Build the report reason string that mods see in mod queue.
- * Kept short — Reddit's mod queue UI truncates around 400 chars.
+ * Build the report reason string that mods see in mod queue. Reddit caps
+ * report reasons at 100 chars, so this is a compact headline; the full
+ * reasoning is kept in the audit log and shown by the "Why flagged?" menu
+ * action.
  */
 export function buildReportReason(verdict: Verdict): string {
   const conf = Math.round(verdict.confidence * 100);
-  const prefix = `ModSentinel (Rule ${verdict.which_rule ?? "?"}, ${conf}% conf)`;
+  const prefix = `ModSentinel R${verdict.which_rule ?? "?"} ${conf}%: `;
   const reasoning = verdict.reasoning.replace(/\s+/g, " ").trim();
-  const remaining = 400 - prefix.length - 3; // " — "
+  const remaining = MAX_REPORT_REASON_CHARS - prefix.length;
   const trimmed = reasoning.length > remaining
-    ? reasoning.slice(0, remaining - 1) + "…"
+    ? reasoning.slice(0, remaining - 1).trimEnd() + "…"
     : reasoning;
-  return `${prefix} — ${trimmed}`;
+  return prefix + trimmed;
 }

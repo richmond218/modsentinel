@@ -1,15 +1,15 @@
 {
   "name": "modsentinels",
-  "version": "0.0.0",
+  "version": "0.2.0",
   "private": true,
   "description": "AI rule-violation pre-screener for Reddit moderators. Devvit app that uses Claude to flag rule-violating posts to mod queue with reasoning.",
-  "license": "BSD-3-Clause",
+  "license": "MIT",
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint src test --ext .ts",
+    "lint": "eslint src test",
     "fmt": "prettier -w src test"
   },
   "engines": {

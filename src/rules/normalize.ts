@@ -1,4 +1,4 @@
-import type { Rule } from "../types.js";
+import type { Example, Rule } from "../types.js";
 
 /**
  * Normalize rules from various raw inputs (Reddit's rules JSON, a wiki page,
@@ -66,4 +66,63 @@ export function truncateRules(rules: Rule[], maxCharsPerRule = 600): Rule[] {
         ? r.description.slice(0, maxCharsPerRule - 3) + "..."
         : r.description,
   }));
+}
+
+/**
+ * Parse the mod's few-shot examples paste. Each example is a block (blank
+ * line between blocks) whose first line starts with a tag:
+ *
+ *   [VIOLATES 1] post body here
+ *   reasoning here
+ *
+ *   [CLEAN] another body
+ *   reasoning here
+ *
+ * "[VIOLATES rule 1]" is accepted too. Untagged blocks are ignored.
+ */
+export function parseExamplesFromPlainText(text: string): Example[] {
+  return text
+    .split(/\n\s*\n/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .map((block): Example | null => {
+      const lines = block.split("\n").map((l) => l.trim());
+      const first = lines[0] ?? "";
+      const reasoning = lines.slice(1).join(" ").trim();
+      const violatesMatch = first.match(/^\[VIOLATES\s+(?:rule\s+)?(\d+)\](.*)$/i);
+      if (violatesMatch?.[1] && violatesMatch[2] !== undefined) {
+        return {
+          violates_rule: Number(violatesMatch[1]),
+          content: violatesMatch[2].trim(),
+          reasoning: reasoning || "Example violation.",
+        };
+      }
+      const cleanMatch = first.match(/^\[CLEAN\](.*)$/i);
+      if (cleanMatch?.[1] !== undefined) {
+        return {
+          violates_rule: null,
+          content: cleanMatch[1].trim(),
+          reasoning: reasoning || "Example clean post.",
+        };
+      }
+      return null;
+    })
+    .filter((e): e is Example => e !== null && e.content.length > 0);
+}
+
+/** Map Devvit's Rule objects (from `reddit.getRules`) onto our Rule shape. */
+export function normalizeRulesFromDevvit(
+  rules: Array<{ shortName: string; description: string; kind: "all" | "link" | "comment"; priority?: number }>,
+): Rule[] {
+  // Number rules the way the sidebar shows them: by priority (0 = top).
+  return [...rules]
+    .map((r, i) => ({ r, order: r.priority ?? i }))
+    .sort((a, b) => a.order - b.order)
+    .map(({ r }, i) => ({
+      index: i + 1,
+      short_name: r.shortName.trim(),
+      description: (r.description || r.shortName).trim(),
+      applies_to: r.kind === "link" ? ("post" as const) : r.kind === "comment" ? ("comment" as const) : ("all" as const),
+    }))
+    .filter((r) => r.short_name.length > 0);
 }

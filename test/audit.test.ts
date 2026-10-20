@@ -3,52 +3,16 @@ import {
   recordDecision,
   recentDecisions,
   recordModFeedback,
+  recordFeedbackFromModAction,
+  getDecision,
+  estimateCostUsd,
+  formatStats,
   auditStats,
   type KVStore,
 } from "../src/moderation/audit.js";
 import type { ContentItem, Verdict } from "../src/types.js";
+import { memStore } from "./helpers.js";
 
-/** In-memory KV store that mimics Devvit's `context.redis` hash API. */
-function memStore(): KVStore {
-  const store = new Map<string, Map<string, string>>();
-  return {
-    async hSet(key, fields) {
-      let h = store.get(key);
-      if (!h) {
-        h = new Map();
-        store.set(key, h);
-      }
-      let added = 0;
-      for (const [f, v] of Object.entries(fields)) {
-        if (!h.has(f)) added++;
-        h.set(f, v);
-      }
-      return added;
-    },
-    async hGet(key, field) {
-      return store.get(key)?.get(field);
-    },
-    async hGetAll(key) {
-      const h = store.get(key);
-      return h ? Object.fromEntries(h) : {};
-    },
-    async hKeys(key) {
-      return Array.from(store.get(key)?.keys() ?? []);
-    },
-    async hDel(key, fields) {
-      const h = store.get(key);
-      if (!h) return 0;
-      let removed = 0;
-      for (const f of fields) {
-        if (h.delete(f)) removed++;
-      }
-      return removed;
-    },
-    async expire() {
-      return true;
-    },
-  };
-}
 
 const content = (id: string, body = "test body"): ContentItem => ({
   id,
@@ -122,5 +86,85 @@ describe("audit log", () => {
     await recordDecision(store, content("t3_a"), verdictClean, false);
     const stats = await auditStats(store);
     expect(stats.precision).toBeNull();
+  });
+});
+
+describe("recordFeedbackFromModAction", () => {
+  const post: ContentItem = { id: "t3_fb", kind: "post", author: "u", body: "b" };
+  const comment: ContentItem = { id: "t1_fb", kind: "comment", author: "u", body: "b" };
+  const flaggedVerdict: Verdict = { violates: true, which_rule: 1, confidence: 0.9, reasoning: "r" };
+  const cleanVerdict: Verdict = { violates: false, which_rule: null, confidence: 0.9, reasoning: "r" };
+
+  it("removing a flagged item is a true positive; approving it is a false positive", async () => {
+    const store = memStore();
+    await recordDecision(store, post, flaggedVerdict, true);
+    expect(await recordFeedbackFromModAction(store, post.id, "removelink")).toBe("true_positive");
+    expect(await recordFeedbackFromModAction(store, post.id, "approvelink")).toBe("false_positive");
+    expect((await getDecision(store, post.id))?.mod_feedback).toBe("false_positive");
+  });
+
+  it("removing an unflagged item is a miss; approving it is a true negative", async () => {
+    const store = memStore();
+    await recordDecision(store, comment, cleanVerdict, false);
+    expect(await recordFeedbackFromModAction(store, comment.id, "spamcomment")).toBe("false_negative");
+    expect(await recordFeedbackFromModAction(store, comment.id, "approvecomment")).toBe("true_negative");
+  });
+
+  it("ignores unrelated actions and unknown items", async () => {
+    const store = memStore();
+    await recordDecision(store, post, flaggedVerdict, true);
+    expect(await recordFeedbackFromModAction(store, post.id, "lock")).toBeNull();
+    expect(await recordFeedbackFromModAction(store, "t3_never_seen", "removelink")).toBeNull();
+    expect((await getDecision(store, post.id))?.mod_feedback).toBeNull();
+  });
+});
+
+describe("auditStats — recall and cost", () => {
+  it("computes recall from misses and sums estimated cost", async () => {
+    const store = memStore();
+    const v: Verdict = { violates: true, which_rule: 1, confidence: 0.9, reasoning: "r" };
+    const usage = { input_tokens: 1_000_000, output_tokens: 0 };
+    await recordDecision(store, { id: "t3_1", kind: "post", author: "a", body: "b" }, v, true, {
+      model: "claude-haiku-5-5",
+      usage,
+    });
+    await recordDecision(
+      store,
+      { id: "t3_2", kind: "post", author: "a", body: "b" },
+      { ...v, violates: false, which_rule: null },
+      false,
+      { model: "claude-haiku-5-5", usage },
+    );
+    await recordModFeedback(store, "t3_1", "true_positive");
+    await recordModFeedback(store, "t3_2", "false_negative");
+    const stats = await auditStats(store);
+    expect(stats.recall).toBeCloseTo(0.5);
+    expect(stats.false_negatives).toBe(1);
+    expect(stats.estimated_cost_usd).toBeCloseTo(0.2);
+    expect(formatStats(stats)).toContain("recall 50%");
+  });
+});
+
+describe("estimateCostUsd", () => {
+  it("prices cache reads at a tenth and cache writes at 1.25x of input", () => {
+    expect(
+      estimateCostUsd("claude-sonnet-5-5", {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: 1_000_000,
+      }),
+    ).toBeCloseTo(0.2);
+    expect(
+      estimateCostUsd("claude-sonnet-5-5", {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 1_000_000,
+      }),
+    ).toBeCloseTo(2.5);
+    expect(estimateCostUsd("claude-opus-5-5", { input_tokens: 0, output_tokens: 1_000_000 })).toBeCloseTo(20);
+  });
+
+  it("is zero without usage data", () => {
+    expect(estimateCostUsd("claude-haiku-5-5", undefined)).toBe(0);
   });
 });
