@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { loadConfig, SETTING_DEFINITIONS, validateDailyLimit, validateThreshold, type SettingsKey } from "../src/settings.js";
+import {
+  loadConfig,
+  SETTING_DEFINITIONS,
+  validateAutoRemoveThreshold,
+  validateDailyLimit,
+  validateThreshold,
+  type SettingsKey,
+} from "../src/settings.js";
 import { MODEL_IDS, resolveModelId } from "../src/types.js";
 import { parseExamplesFromPlainText, parseRulesFromPlainText } from "../src/rules/normalize.js";
 import { SAMPLE_RULES } from "./fixtures.js";
@@ -32,6 +39,10 @@ describe("loadConfig", () => {
       skip_moderators: true,
       skip_approved_users: true,
       exempt_users: [],
+      auto_remove_threshold: 0,
+      add_mod_notes: false,
+      rescan_edits: true,
+      weekly_report: true,
     });
     expect(config?.rules).toHaveLength(2);
   });
@@ -106,5 +117,30 @@ describe("validators", () => {
     expect(validateThreshold(90)).toMatch(/between 0 and 1/);
     expect(validateDailyLimit(0)).toBeUndefined();
     expect(validateDailyLimit(2.5)).toMatch(/whole number/);
+  });
+});
+
+describe("auto-remove threshold", () => {
+  async function load(value: unknown) {
+    const config = await loadConfig(
+      settings({ claude_api_key: "k", rules_text: RULES_TEXT, auto_remove_threshold: value }),
+      "s",
+      parseRulesFromPlainText,
+      parseExamplesFromPlainText,
+    );
+    return config?.auto_remove_threshold;
+  }
+
+  it("accepts values from 0.9 to 1 and fails closed on anything else", async () => {
+    expect(await load(0.97)).toBe(0.97);
+    expect(await load(0.5)).toBe(0);
+    expect(await load(9.7)).toBe(0);
+    expect(await load(undefined)).toBe(0);
+  });
+
+  it("validates the form input", () => {
+    expect(validateAutoRemoveThreshold(0)).toBeUndefined();
+    expect(validateAutoRemoveThreshold(0.97)).toBeUndefined();
+    expect(validateAutoRemoveThreshold(0.5)).toMatch(/0.9 to 1/);
   });
 });

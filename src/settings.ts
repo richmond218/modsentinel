@@ -25,7 +25,11 @@ export type SettingsKey =
   | "daily_call_limit"
   | "skip_moderators"
   | "skip_approved_users"
-  | "exempt_users";
+  | "exempt_users"
+  | "auto_remove_threshold"
+  | "add_mod_notes"
+  | "rescan_edits"
+  | "weekly_report";
 
 export interface DevvitSettingsAdapter {
   get<T = unknown>(key: SettingsKey): Promise<T | undefined>;
@@ -59,6 +63,10 @@ export async function loadConfig(
     skipModerators,
     skipApproved,
     exemptUsers,
+    autoRemove,
+    addModNotes,
+    rescanEdits,
+    weeklyReport,
   ] = await Promise.all([
     settings.get<string>("claude_api_key"),
     settings.get<string>("rules_text"),
@@ -72,6 +80,10 @@ export async function loadConfig(
     settings.get<boolean>("skip_moderators"),
     settings.get<boolean>("skip_approved_users"),
     settings.get<string>("exempt_users"),
+    settings.get<number>("auto_remove_threshold"),
+    settings.get<boolean>("add_mod_notes"),
+    settings.get<boolean>("rescan_edits"),
+    settings.get<boolean>("weekly_report"),
   ]);
 
   if (!claudeKey) return null;
@@ -102,7 +114,26 @@ export async function loadConfig(
     skip_approved_users: skipApproved ?? true,
     exempt_users: parseUserList(exemptUsers),
     min_content_chars: 3,
+    // Anything outside the allowed band (including a typo like 9.5) disables
+    // removal rather than guessing: removing content is the one irreversible-
+    // looking thing ModSentinel can do, so it fails closed.
+    auto_remove_threshold:
+      typeof autoRemove === "number" && autoRemove >= MIN_AUTO_REMOVE_THRESHOLD && autoRemove <= 1 ? autoRemove : 0,
+    add_mod_notes: addModNotes ?? false,
+    rescan_edits: rescanEdits ?? true,
+    weekly_report: weeklyReport ?? true,
   };
+}
+
+/** Auto-remove is only allowed for near-certain verdicts. */
+export const MIN_AUTO_REMOVE_THRESHOLD = 0.9;
+
+/** Settings-form validator for the auto-remove threshold. */
+export function validateAutoRemoveThreshold(value: number | undefined): string | undefined {
+  if (value === undefined || value === 0) return undefined;
+  return value >= MIN_AUTO_REMOVE_THRESHOLD && value <= 1
+    ? undefined
+    : `Enter 0 (off) or a number from ${MIN_AUTO_REMOVE_THRESHOLD} to 1, e.g. 0.97`;
 }
 
 function isUnitInterval(n: unknown): n is number {
@@ -202,6 +233,36 @@ export const SETTING_DEFINITIONS = [
     helpText:
       "Maximum Claude calls per day (UTC), to cap your API bill during raids or spam waves. 0 = unlimited.",
     onValidate: ({ value }: { value?: number | undefined }) => validateDailyLimit(value),
+  },
+  {
+    name: "auto_remove_threshold" as const,
+    label: "Auto-remove threshold (0 = off)",
+    type: "number" as const,
+    defaultValue: 0,
+    helpText:
+      "Off by default. When set (0.9-1.0, e.g. 0.97), verdicts at or above it are removed instead of reported, with a mod note explaining why. Approving the item restores it. Has no effect while dry run is on.",
+    onValidate: ({ value }: { value?: number | undefined }) => validateAutoRemoveThreshold(value),
+  },
+  {
+    name: "add_mod_notes" as const,
+    label: "Add mod notes when flagging",
+    type: "boolean" as const,
+    defaultValue: false,
+    helpText: "Leave a mod note on the author with the rule and reasoning, so repeat issues show up in their history.",
+  },
+  {
+    name: "rescan_edits" as const,
+    label: "Re-scan edited posts and comments",
+    type: "boolean" as const,
+    defaultValue: true,
+    helpText: "Catches content that was edited into a violation after passing its first scan.",
+  },
+  {
+    name: "weekly_report" as const,
+    label: "Weekly report",
+    type: "boolean" as const,
+    defaultValue: true,
+    helpText: "Send the mod team a weekly modmail with accuracy, flags by rule, and tuning tips.",
   },
   {
     name: "skip_moderators" as const,

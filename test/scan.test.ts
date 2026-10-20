@@ -20,6 +20,10 @@ const CONFIG: SubredditConfig = {
   skip_approved_users: true,
   exempt_users: [],
   min_content_chars: 3,
+  auto_remove_threshold: 0,
+  add_mod_notes: false,
+  rescan_edits: true,
+  weekly_report: true,
 };
 
 const VIOLATION: Verdict = { violates: true, which_rule: 1, confidence: 0.95, reasoning: "Insult." };
@@ -49,7 +53,7 @@ describe("scanContent", () => {
   it("classifies, reports and records a violation", async () => {
     const { d, classifyWithUsage, report } = deps();
     const out = await scanContent(d, POST_VIOLATION_RULE1);
-    expect(out).toMatchObject({ status: "classified", flagged: true, dryRun: false });
+    expect(out).toMatchObject({ status: "classified", flagged: true, action: "reported", dryRun: false });
     expect(classifyWithUsage).toHaveBeenCalledOnce();
     expect(report).toHaveBeenCalledOnce();
     const entry = await getDecision(d.kv, POST_VIOLATION_RULE1.id);
@@ -149,5 +153,72 @@ describe("scanContent", () => {
     const out = await scanContent(d, POST_VIOLATION_RULE1);
     expect(out).toMatchObject({ status: "classified", flagged: true, dryRun: true });
     expect(report).not.toHaveBeenCalled();
+  });
+});
+
+describe("scanContent — edits", () => {
+  const CLEAN: Verdict = { violates: false, which_rule: null, confidence: 0.9, reasoning: "Fine." };
+  const original: ContentItem = { id: "t3_edit", kind: "post", author: "a", title: "Help", body: "How do I parse JSON?" };
+  const edited: ContentItem = { ...original, body: "Buy followers at spam.example" };
+
+  it("re-scans a clean item whose text changed", async () => {
+    const { d, classifyWithUsage } = deps({ verdict: CLEAN });
+    await scanContent(d, original);
+    const out = await scanContent(d, edited, { edited: true });
+    expect(out.status).toBe("classified");
+    expect(classifyWithUsage).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips edit events whose text is unchanged", async () => {
+    const { d, classifyWithUsage } = deps({ verdict: CLEAN });
+    await scanContent(d, original);
+    expect(await scanContent(d, original, { edited: true })).toEqual({ status: "skipped", reason: "text unchanged" });
+    expect(classifyWithUsage).toHaveBeenCalledOnce();
+  });
+
+  it("doesn't re-scan items already flagged or reviewed, or when turned off", async () => {
+    const flagged = deps();
+    await scanContent(flagged.d, original);
+    expect(await scanContent(flagged.d, edited, { edited: true })).toEqual({
+      status: "skipped",
+      reason: "already flagged",
+    });
+
+    const off = deps({ verdict: CLEAN, config: { rescan_edits: false } });
+    await scanContent(off.d, original);
+    expect(await scanContent(off.d, edited, { edited: true })).toEqual({
+      status: "skipped",
+      reason: "edit re-scanning is off",
+    });
+  });
+
+  it("scans an edited item it has never seen", async () => {
+    const { d, classifyWithUsage } = deps({ verdict: CLEAN });
+    await scanContent(d, edited, { edited: true });
+    expect(classifyWithUsage).toHaveBeenCalledOnce();
+  });
+});
+
+describe("scanContent — auto-remove", () => {
+  it("removes instead of reporting at or above the auto-remove threshold", async () => {
+    const remove = vi.fn(async () => {});
+    const addModNote = vi.fn(async () => {});
+    const { d, report } = deps({ config: { auto_remove_threshold: 0.95 } });
+    d.reddit = { ...d.reddit, remove, addModNote };
+    const out = await scanContent(d, POST_VIOLATION_RULE1);
+    expect(out).toMatchObject({ status: "classified", action: "removed" });
+    expect(remove).toHaveBeenCalledOnce();
+    expect(report).not.toHaveBeenCalled();
+    expect(addModNote).toHaveBeenCalledOnce();
+    expect((await getDecision(d.kv, POST_VIOLATION_RULE1.id))?.action).toBe("removed");
+  });
+
+  it("reports when confidence is between the flag and remove thresholds", async () => {
+    const remove = vi.fn(async () => {});
+    const { d, report } = deps({ config: { auto_remove_threshold: 0.97 } });
+    d.reddit = { ...d.reddit, remove };
+    await scanContent(d, POST_VIOLATION_RULE1);
+    expect(remove).not.toHaveBeenCalled();
+    expect(report).toHaveBeenCalledOnce();
   });
 });

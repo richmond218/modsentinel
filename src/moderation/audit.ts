@@ -21,6 +21,21 @@ const MAX_ENTRIES = 500;
 export interface DecisionMeta {
   model?: string;
   usage?: AuditEntry["usage"];
+  action?: AuditEntry["action"];
+}
+
+/**
+ * Short, stable fingerprint of the text ModSentinel judged (FNV-1a, 32-bit).
+ * Used to tell a real edit from a re-delivered or no-op update event.
+ */
+export function contentHash(content: ContentItem): string {
+  const text = `${content.title ?? ""}\u0000${content.body}\u0000${content.url ?? ""}`;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
 }
 
 /**
@@ -42,7 +57,9 @@ export async function recordDecision(
     content_excerpt: ((content.title ? content.title + " — " : "") + content.body).slice(0, 280),
     verdict,
     flagged,
+    content_hash: contentHash(content),
     mod_feedback: null,
+    ...(meta.action !== undefined ? { action: meta.action } : {}),
     ...(meta.model !== undefined ? { model: meta.model } : {}),
     ...(meta.usage !== undefined ? { usage: meta.usage } : {}),
   };
@@ -174,6 +191,7 @@ export function estimateCostUsd(model: string | undefined, usage: AuditEntry["us
 export interface AuditStats {
   total: number;
   flagged: number;
+  removed: number;
   true_positives: number;
   false_positives: number;
   false_negatives: number;
@@ -183,8 +201,13 @@ export interface AuditStats {
   estimated_cost_usd: number;
 }
 
-export async function auditStats(store: KVStore): Promise<AuditStats> {
-  const entries = await recentDecisions(store, MAX_ENTRIES);
+export async function auditStats(store: KVStore, since?: Date): Promise<AuditStats> {
+  const all = await recentDecisions(store, MAX_ENTRIES);
+  return computeStats(since ? all.filter((e) => e.ts >= since.toISOString()) : all);
+}
+
+/** Stats over a given set of audit entries. */
+export function computeStats(entries: AuditEntry[]): AuditStats {
   const flagged = entries.filter((e) => e.flagged);
   const tp = flagged.filter((e) => e.mod_feedback === "true_positive").length;
   const fp = flagged.filter((e) => e.mod_feedback === "false_positive").length;
@@ -196,6 +219,7 @@ export async function auditStats(store: KVStore): Promise<AuditStats> {
   return {
     total: entries.length,
     flagged: flagged.length,
+    removed: entries.filter((e) => e.action === "removed").length,
     true_positives: tp,
     false_positives: fp,
     false_negatives: fn,

@@ -3,8 +3,9 @@
  *
  * Registers PostSubmit + CommentSubmit triggers that run the Claude classifier
  * and (optionally) flag rule violations to the mod queue, a ModAction trigger
- * that turns mod approve/remove decisions into accuracy feedback, and mod-only
- * menu actions (scan now, why flagged, stats).
+ * that turns mod approve/remove decisions into accuracy feedback, PostUpdate +
+ * CommentUpdate triggers that re-scan edits, a weekly modmail report job, and
+ * mod-only menu actions (scan now, why flagged, stats).
  *
  * Settings are configured per-installation by the moderator (see `settings.ts`
  * and `Devvit.addSettings(...)` below).
@@ -12,16 +13,24 @@
 import { Devvit, type TriggerContext } from "@devvit/public-api";
 
 import { ClaudeClassifier } from "./classifier/claude.js";
-import { auditStats, formatStats, getDecision, recordFeedbackFromModAction, type KVStore } from "./moderation/audit.js";
+import {
+  auditStats,
+  formatStats,
+  getDecision,
+  recentDecisions,
+  recordFeedbackFromModAction,
+  type KVStore,
+} from "./moderation/audit.js";
 import { callsToday, type CounterStore } from "./moderation/budget.js";
 import { buildReportReason } from "./moderation/flag.js";
+import { buildWeeklyReport } from "./moderation/report.js";
 import {
   normalizeRulesFromDevvit,
   parseExamplesFromPlainText,
   parseRulesFromPlainText,
   truncateRules,
 } from "./rules/normalize.js";
-import { scanContent, type ScanDeps, type ScanOutcome } from "./scan.js";
+import { scanContent, type ScanDeps, type ScanOptions, type ScanOutcome } from "./scan.js";
 import { loadConfig, SETTING_DEFINITIONS } from "./settings.js";
 import type { ContentItem } from "./types.js";
 
@@ -82,6 +91,15 @@ async function scanDeps(ctx: TriggerContext): Promise<ScanDeps> {
             : await ctx.reddit.getCommentById(target.id);
         await ctx.reddit.report(thing, { reason: opts.reason });
       },
+      remove: (target) => ctx.reddit.remove(target.id, false),
+      addModNote: async ({ user, note, redditId }) => {
+        await ctx.reddit.addModNote({
+          subreddit,
+          user,
+          note,
+          redditId: redditId as `t1_${string}` | `t3_${string}`,
+        });
+      },
     },
     kv: kvStore(ctx),
     counters: counterStore(ctx),
@@ -94,8 +112,8 @@ async function scanDeps(ctx: TriggerContext): Promise<ScanDeps> {
   };
 }
 
-async function scan(ctx: TriggerContext, content: ContentItem, force = false): Promise<ScanOutcome> {
-  return scanContent(await scanDeps(ctx), content, { force });
+async function scan(ctx: TriggerContext, content: ContentItem, options: ScanOptions = {}): Promise<ScanOutcome> {
+  return scanContent(await scanDeps(ctx), content, options);
 }
 
 Devvit.addTrigger({
@@ -129,6 +147,41 @@ Devvit.addTrigger({
   },
 });
 
+/** Re-scan edited posts: a clean post can be edited into spam after it passes. */
+Devvit.addTrigger({
+  event: "PostUpdate",
+  onEvent: async (event, ctx) => {
+    if (!event.post || !event.author) return;
+    if (event.post.spam || event.post.deleted) return;
+    if ((event.post.selftext ?? "") === event.previousBody) return;
+    await scan(
+      ctx,
+      {
+        id: event.post.id,
+        kind: "post",
+        author: event.author.name,
+        title: event.post.title,
+        body: event.post.selftext ?? "",
+      },
+      { edited: true },
+    );
+  },
+});
+
+Devvit.addTrigger({
+  event: "CommentUpdate",
+  onEvent: async (event, ctx) => {
+    if (!event.comment || !event.author) return;
+    if (event.comment.spam || event.comment.deleted) return;
+    if ((event.comment.body ?? "") === event.previousBody) return;
+    await scan(
+      ctx,
+      { id: event.comment.id, kind: "comment", author: event.author.name, body: event.comment.body ?? "" },
+      { edited: true },
+    );
+  },
+});
+
 /** Learn from what mods actually do with items ModSentinel has seen. */
 Devvit.addTrigger({
   event: "ModAction",
@@ -136,6 +189,9 @@ Devvit.addTrigger({
     const action = event.action ?? "";
     const targetId = action.endsWith("comment") ? event.targetComment?.id : event.targetPost?.id;
     if (!targetId) return;
+    // ModSentinel's own auto-removals fire this trigger too; only humans count as feedback.
+    const appUser = await ctx.reddit.getAppUser().catch(() => undefined);
+    if (appUser && event.moderator?.name?.toLowerCase() === appUser.username.toLowerCase()) return;
     const feedback = await recordFeedbackFromModAction(kvStore(ctx), targetId, action);
     if (feedback) console.log(`[ModSentinel] ${targetId} ${action} → ${feedback}`);
   },
@@ -167,8 +223,14 @@ function describeOutcome(outcome: ScanOutcome): string {
     case "classified": {
       const v = outcome.verdict;
       if (!v.violates) return `Clean (${Math.round(v.confidence * 100)}% conf): ${v.reasoning}`;
-      const action = outcome.flagged ? (outcome.dryRun ? "Would flag (dry run)" : "Flagged") : "Below threshold";
-      return `${action} — ${buildReportReason(v)}`;
+      const label: Record<typeof outcome.action, string> = {
+        none: "Below threshold",
+        reported: "Reported",
+        removed: "Removed",
+        would_report: "Would report (dry run)",
+        would_remove: "Would remove (dry run)",
+      };
+      return `${label[outcome.action]} — ${buildReportReason(v)}`;
     }
   }
 }
@@ -181,7 +243,7 @@ Devvit.addMenuItem({
   onPress: async (event, ctx) => {
     try {
       const content = await contentFromTarget(ctx, event.targetId);
-      ctx.ui.showToast(describeOutcome(await scan(ctx, content, true)));
+      ctx.ui.showToast(describeOutcome(await scan(ctx, content, { force: true })));
     } catch (err) {
       ctx.ui.showToast(`Scan failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -201,7 +263,7 @@ Devvit.addMenuItem({
     }
     const v = entry.verdict;
     const head = v.violates
-      ? `Rule ${v.which_rule}, ${Math.round(v.confidence * 100)}% conf${entry.flagged ? "" : " (not flagged)"}`
+      ? `Rule ${v.which_rule}, ${Math.round(v.confidence * 100)}% conf${entry.action === "removed" ? ", auto-removed" : entry.flagged ? "" : " (not flagged)"}`
       : `Clean, ${Math.round(v.confidence * 100)}% conf`;
     ctx.ui.showToast(`${head}: ${v.reasoning}`);
   },
@@ -217,5 +279,34 @@ Devvit.addMenuItem({
     ctx.ui.showToast(`${formatStats(stats)} ${today} calls today.`);
   },
 });
+
+const WEEKLY_REPORT_JOB = "modsentinel_weekly_report";
+
+Devvit.addSchedulerJob({
+  name: WEEKLY_REPORT_JOB,
+  onRun: async (_event, ctx) => {
+    const deps = await scanDeps(ctx);
+    const config = await deps.loadConfig();
+    if (!config?.weekly_report) return;
+    const report = buildWeeklyReport(await recentDecisions(deps.kv, 500), config.rules, config);
+    if (!report) return;
+    await ctx.reddit.modMail.createModNotification({
+      subject: report.subject.slice(0, 100),
+      bodyMarkdown: report.bodyMarkdown,
+      subredditId: ctx.subredditId,
+    });
+  },
+});
+
+/** (Re)schedule the weekly report: Mondays 14:00 UTC. Idempotent across upgrades. */
+async function scheduleWeeklyReport(ctx: TriggerContext): Promise<void> {
+  for (const job of await ctx.scheduler.listJobs()) {
+    if (job.name === WEEKLY_REPORT_JOB) await ctx.scheduler.cancelJob(job.id);
+  }
+  await ctx.scheduler.runJob({ name: WEEKLY_REPORT_JOB, cron: "0 14 * * 1" });
+}
+
+Devvit.addTrigger({ event: "AppInstall", onEvent: (_event, ctx) => scheduleWeeklyReport(ctx) });
+Devvit.addTrigger({ event: "AppUpgrade", onEvent: (_event, ctx) => scheduleWeeklyReport(ctx) });
 
 export default Devvit;

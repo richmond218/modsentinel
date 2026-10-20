@@ -25,11 +25,13 @@ AutoMod helps with patterns you can spell out in regex, but every sub has rules 
    - Dry run on/off (default ON)
    - Daily scan limit (default 500 calls/day) to cap the API bill
    - Who to skip: moderators, approved users, and an exempt-users list
+   - Optional: auto-remove threshold (off by default), mod notes on flagged users, edit re-scanning (on), weekly report (on)
 3. On every new post (and optional comment), ModSentinel:
    - Skips AutoModerator, its own account, mods/approved users/exempt users, near-empty content, and items it has already scanned
    - Sends the content + the rules that apply to that kind of content + examples to Claude
    - Receives a schema-constrained verdict: `{ violates, which_rule, confidence, reasoning }`
    - If `violates && confidence >= threshold && !dry_run` → reports to mod queue with a short reason
+   - If auto-remove is turned on and confidence is at or above its threshold (0.9-1.0) → removes the item and leaves a mod note saying why
    - Always logs the decision (with token usage) to a per-install audit store
 4. Mods see flagged items in mod queue with a one-line reason (Reddit caps report reasons at 100 characters):
    > `ModSentinel R1 92%: Calls users "morons" and dismisses anyone who agrees with them.`
@@ -44,13 +46,19 @@ From the `...` menu (mods only):
 | Post / comment | **ModSentinel: why flagged?** | Shows the full verdict and reasoning for an item ModSentinel has scanned. |
 | Subreddit | **ModSentinel: stats** | Items scanned and flagged, precision, recall, estimated API cost over 14 days, and calls today. |
 
+### Edits, notes and the weekly report
+
+- **Edited content is re-scanned.** A clean post edited into a spam link after its first scan gets classified again. Unchanged or already-flagged items aren't re-billed.
+- **Mod notes** (optional) put the rule and reasoning in the author's mod-notes history, so repeat behaviour is visible across items. Auto-removals always get a note.
+- **Weekly report** by modmail every Monday: volume, precision and recall, flags by rule, items mods overturned (good candidates for `[CLEAN]` examples), and plain-language tuning tips. For example, it suggests turning dry run off once dry-run precision stays above 90%.
+
 ### Accuracy tracking without extra clicks
 
 ModSentinel watches mod actions. When a mod removes an item it flagged, that counts as a true positive; approving it counts as a false positive. Removing an item it *didn't* flag counts as a miss. Precision and recall in **stats** come from what mods actually do, with no rating step.
 
 ### Safety
 
-- **Never removes content.** It only reports to the mod queue, and dry run is on by default.
+- **Reports by default; removes only if you opt in.** Auto-remove is off unless a mod sets a threshold of 0.9 or higher. An out-of-range value turns it off rather than guessing. Dry run (on by default) overrides it. Approving an auto-removed item restores it and counts as a false positive. ModSentinel's own removals are never counted as mod feedback.
 - **Prompt-injection hardening.** Post text goes inside a `<user_content>` block, and any look-alike delimiter tags in the post are escaped so a post can't close the block early and pass itself off as instructions. The model is told to ignore instructions inside user content.
 - **Verdicts are checked.** Responses are schema-constrained JSON, validated again with Zod. A verdict that cites a rule number that doesn't exist is discarded. Refusals are treated as errors, never as verdicts.
 - **Bounded spend.** A daily call limit, duplicate-trigger protection, and an 8,000-character cap on post bodies.
@@ -60,13 +68,13 @@ ModSentinel watches mod actions. When a mod removes an item it flagged, that cou
 - **TypeScript** on the [Devvit](https://developers.reddit.com) platform (runs on Reddit's servers)
 - **Claude API** via `fetch` (Haiku 5.5 by default; Sonnet 5.5 / Opus 5.5 selectable), with structured outputs, `effort: "low"`, and prompt caching of the per-sub rules block
 - **Zod** for schema-validated parsing
-- **Vitest** with 104 unit tests (mocked Claude responses, in-memory Redis)
+- **Vitest** with 127 unit tests (mocked Claude responses, in-memory Redis)
 
 ## Project structure
 
 ```
 src/
-├── main.ts                     # Devvit wiring — triggers (PostSubmit, CommentSubmit, ModAction), menu items
+├── main.ts                     # Devvit wiring — triggers (submit, update, ModAction, install), menu items, weekly job
 ├── scan.ts                     # Devvit-agnostic pipeline: config → skip → budget → classify → flag → audit
 ├── types.ts                    # Zod schemas + model list: Rule, Example, Verdict, SubredditConfig, AuditEntry
 ├── settings.ts                 # Devvit settings schema, validators, loadConfig()
@@ -77,10 +85,11 @@ src/
 ├── rules/
 │   └── normalize.ts            # Rules/examples text parsers, Reddit rules → Rule[], truncation
 └── moderation/
-    ├── flag.ts                 # Decide whether to flag; build the ≤100-char report reason
+    ├── flag.ts                 # Report / remove / mod note; ≤100-char report reason, ≤250-char note
     ├── filters.ts              # Who/what to skip before spending an API call
     ├── budget.ts               # Daily call limit (Redis counter)
-    └── audit.ts                # Audit log, mod-action feedback, precision/recall/cost stats
+    ├── audit.ts                # Audit log, edit hashes, mod-action feedback, precision/recall/cost stats
+    └── report.ts               # Weekly modmail report + tuning tips
 test/                           # One test file per module, plus scan.test.ts for the full pipeline
 ```
 
@@ -88,7 +97,7 @@ test/                           # One test file per module, plus scan.test.ts fo
 
 ```bash
 npm install
-npm test              # 104 tests, ~2s
+npm test              # 127 tests, ~2s
 npm run build         # tsc --noEmit
 npm run lint
 ```
@@ -112,11 +121,12 @@ Shipped since the hackathon build:
 - Auto-fetching the sub's rules, per-rule post/comment scoping
 - Skip lists, duplicate protection, daily spend cap
 - Automatic accuracy tracking from mod actions; scan-now / why-flagged / stats menu actions
+- Opt-in auto-remove for near-certain verdicts, mod notes, edit re-scanning, weekly modmail report
 
 Next up:
 
 1. Removal-reason drafting: suggest a removal message citing the rule when a mod removes a flagged item
-2. `RemoveContent` action with confidence ≥ 0.97 for the very obvious cases (opt-in, mod approval required on first install)
+2. Image posts: send images to Claude so image-only rule breaks are caught
 3. A dashboard custom post showing per-sub precision over time
 
 ## License

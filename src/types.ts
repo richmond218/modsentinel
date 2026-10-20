@@ -60,6 +60,15 @@ export const SubredditConfigSchema = z.object({
   skip_approved_users: z.boolean().default(true),
   exempt_users: z.array(z.string()).default([]).describe("Lowercase usernames that are never scanned"),
   min_content_chars: z.number().int().min(0).default(3),
+  auto_remove_threshold: z
+    .number()
+    .min(0)
+    .max(1)
+    .default(0)
+    .describe("Remove (not just report) at or above this confidence. 0 = never remove"),
+  add_mod_notes: z.boolean().default(false).describe("Leave a mod note on the author when content is flagged"),
+  rescan_edits: z.boolean().default(true).describe("Re-classify posts/comments when their text is edited"),
+  weekly_report: z.boolean().default(true).describe("Send the mod team a weekly accuracy report via modmail"),
 });
 export type SubredditConfig = z.infer<typeof SubredditConfigSchema>;
 
@@ -71,7 +80,12 @@ export const AuditEntrySchema = z.object({
   author: z.string().optional(),
   content_excerpt: z.string().max(280),
   verdict: VerdictSchema,
-  flagged: z.boolean().describe("Whether ModSentinel actually flagged it (false when below threshold or dry_run)"),
+  flagged: z.boolean().describe("Whether ModSentinel flagged it (or would have, in dry run)"),
+  action: z
+    .enum(["none", "reported", "removed", "would_report", "would_remove"])
+    .optional()
+    .describe("What ModSentinel did about it. Missing on entries from older versions"),
+  content_hash: z.string().optional().describe("Hash of the scanned text, to detect edits"),
   mod_feedback: z.enum(["true_positive", "false_positive", "true_negative", "false_negative"]).nullable().default(null),
   model: z.string().optional(),
   usage: z

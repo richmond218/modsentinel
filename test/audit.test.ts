@@ -6,6 +6,7 @@ import {
   recordFeedbackFromModAction,
   getDecision,
   estimateCostUsd,
+  contentHash,
   formatStats,
   auditStats,
   type KVStore,
@@ -166,5 +167,15 @@ describe("estimateCostUsd", () => {
 
   it("is zero without usage data", () => {
     expect(estimateCostUsd("claude-haiku-5-5", undefined)).toBe(0);
+  });
+});
+
+describe("contentHash", () => {
+  it("changes when the text changes and is stable otherwise", () => {
+    const a: ContentItem = { id: "t3_h", kind: "post", author: "x", title: "T", body: "B" };
+    expect(contentHash(a)).toBe(contentHash({ ...a }));
+    expect(contentHash(a)).not.toBe(contentHash({ ...a, body: "B!" }));
+    expect(contentHash(a)).not.toBe(contentHash({ ...a, url: "https://x.example" }));
+    expect(contentHash(a)).toMatch(/^[0-9a-f]{8}$/);
   });
 });
