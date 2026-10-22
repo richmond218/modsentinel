@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import type { ClassifyResult } from "../src/classifier/claude.js";
 import { getDecision } from "../src/moderation/audit.js";
 import { scanContent, type ScanDeps } from "../src/scan.js";
-import type { ContentItem, SubredditConfig, Verdict } from "../src/types.js";
+import { DEFAULT_REMOVAL_TEMPLATE, type ContentItem, type SubredditConfig, type Verdict } from "../src/types.js";
 import { SAMPLE_RULES, POST_VIOLATION_RULE1 } from "./fixtures.js";
 import { memCounters, memStore } from "./helpers.js";
 
@@ -24,6 +24,8 @@ const CONFIG: SubredditConfig = {
   add_mod_notes: false,
   rescan_edits: true,
   weekly_report: true,
+  scan_images: true,
+  removal_message_template: DEFAULT_REMOVAL_TEMPLATE,
 };
 
 const VIOLATION: Verdict = { violates: true, which_rule: 1, confidence: 0.95, reasoning: "Insult." };
@@ -220,5 +222,23 @@ describe("scanContent — auto-remove", () => {
     await scanContent(d, POST_VIOLATION_RULE1);
     expect(remove).not.toHaveBeenCalled();
     expect(report).toHaveBeenCalledOnce();
+  });
+});
+
+describe("scanContent — images", () => {
+  const IMAGE_ONLY: ContentItem = { id: "t3_pic", kind: "post", author: "a", body: "", imageUrls: ["https://i.redd.it/a.jpg"] };
+
+  it("scans image-only posts instead of skipping them as too short", async () => {
+    const { d, classifyWithUsage } = deps();
+    await scanContent(d, IMAGE_ONLY);
+    const params = classifyWithUsage.mock.calls[0] as unknown as [{ content: ContentItem }];
+    expect(params[0].content.imageUrls).toEqual(["https://i.redd.it/a.jpg"]);
+  });
+
+  it("strips images when image scanning is off", async () => {
+    const { d, classifyWithUsage } = deps({ config: { scan_images: false } });
+    await scanContent(d, { ...IMAGE_ONLY, title: "A long enough title" });
+    const params = classifyWithUsage.mock.calls[0] as unknown as [{ content: ContentItem }];
+    expect(params[0].content.imageUrls).toEqual([]);
   });
 });

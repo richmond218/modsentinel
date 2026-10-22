@@ -45,6 +45,13 @@ export function resolveModelId(value: unknown): ModelId {
   return DEFAULT_MODEL;
 }
 
+/** Default text for "remove with reason". Placeholders are filled in by `renderRemovalMessage`. */
+export const DEFAULT_REMOVAL_TEMPLATE = `Hi u/{author}, your {kind} was removed for breaking **Rule {rule_number}: {rule_name}**.
+
+{reason}
+
+If you think this was a mistake, please [message the moderators](https://www.reddit.com/message/compose?to=r/{subreddit}).`;
+
 /** The full configuration a mod provides when installing ModSentinel. */
 export const SubredditConfigSchema = z.object({
   subreddit: z.string().describe("Subreddit name (without r/)"),
@@ -69,6 +76,8 @@ export const SubredditConfigSchema = z.object({
   add_mod_notes: z.boolean().default(false).describe("Leave a mod note on the author when content is flagged"),
   rescan_edits: z.boolean().default(true).describe("Re-classify posts/comments when their text is edited"),
   weekly_report: z.boolean().default(true).describe("Send the mod team a weekly accuracy report via modmail"),
+  scan_images: z.boolean().default(true).describe("Show post images to the classifier"),
+  removal_message_template: z.string().default(DEFAULT_REMOVAL_TEMPLATE),
 });
 export type SubredditConfig = z.infer<typeof SubredditConfigSchema>;
 
@@ -109,4 +118,6 @@ export interface ContentItem {
   body: string;
   /** Link URL for link posts. Shown to the classifier so link-drop spam is visible. */
   url?: string;
+  /** Images in the post (image posts, galleries, direct image links). */
+  imageUrls?: string[];
 }

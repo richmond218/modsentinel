@@ -31,7 +31,7 @@ export async function skipReason(
   if (config.exempt_users.includes(author)) return `u/${content.author} is on the exempt list`;
 
   const text = `${content.title ?? ""} ${content.body} ${content.url ?? ""}`.trim();
-  if (text.length < config.min_content_chars) return "content too short";
+  if (text.length < config.min_content_chars && !content.imageUrls?.length) return "content too short";
 
   if (config.skip_moderators && (await deps.isModerator(content.author))) {
     return `u/${content.author} is a moderator`;

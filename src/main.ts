@@ -5,7 +5,7 @@
  * and (optionally) flag rule violations to the mod queue, a ModAction trigger
  * that turns mod approve/remove decisions into accuracy feedback, PostUpdate +
  * CommentUpdate triggers that re-scan edits, a weekly modmail report job, and
- * mod-only menu actions (scan now, why flagged, stats).
+ * mod-only menu actions (scan now, why flagged, remove with reason, stats).
  *
  * Settings are configured per-installation by the moderator (see `settings.ts`
  * and `Devvit.addSettings(...)` below).
@@ -13,6 +13,7 @@
 import { Devvit, type TriggerContext } from "@devvit/public-api";
 
 import { ClaudeClassifier } from "./classifier/claude.js";
+import { extractImageUrls, type PostMediaFields } from "./content/images.js";
 import {
   auditStats,
   formatStats,
@@ -21,8 +22,15 @@ import {
   recordFeedbackFromModAction,
   type KVStore,
 } from "./moderation/audit.js";
-import { callsToday, type CounterStore } from "./moderation/budget.js";
+import { callsToday, tryConsumeCall, type CounterStore } from "./moderation/budget.js";
 import { buildReportReason } from "./moderation/flag.js";
+import {
+  renderRemovalMessage,
+  resolveRule,
+  setPendingRemoval,
+  takePendingRemoval,
+  type PendingStore,
+} from "./moderation/removal.js";
 import { buildWeeklyReport } from "./moderation/report.js";
 import {
   normalizeRulesFromDevvit,
@@ -58,6 +66,26 @@ function counterStore(ctx: TriggerContext): CounterStore {
     incrBy: (k, n) => ctx.redis.incrBy(k, n).then((v) => Number(v)),
     get: (k) => ctx.redis.get(k),
     expire: (k, s) => ctx.redis.expire(k, s).then(() => true),
+  };
+}
+
+/** Build the classifier's view of a post from trigger-event or Post-model fields. */
+function postContent(
+  post: PostMediaFields & { id: string; title: string; selftext?: string; permalink: string },
+  author: string,
+): ContentItem {
+  const imageUrls = extractImageUrls(post);
+  // Self posts' url is their own permalink, and an image post's url is the
+  // image itself; only a genuine outbound link is worth showing as a URL.
+  const link = post.url && !post.url.includes(post.permalink) && !imageUrls.includes(post.url) ? post.url : undefined;
+  return {
+    id: post.id,
+    kind: "post",
+    author,
+    title: post.title,
+    body: post.selftext ?? "",
+    ...(link ? { url: link } : {}),
+    ...(imageUrls.length ? { imageUrls } : {}),
   };
 }
 
@@ -121,15 +149,7 @@ Devvit.addTrigger({
   onEvent: async (event, ctx) => {
     if (!event.post || !event.author) return;
     if (event.post.spam || event.post.deleted) return;
-    const url = event.post.url && !event.post.url.includes(event.post.permalink) ? event.post.url : undefined;
-    await scan(ctx, {
-      id: event.post.id,
-      kind: "post",
-      author: event.author.name,
-      title: event.post.title,
-      body: event.post.selftext ?? "",
-      ...(url ? { url } : {}),
-    });
+    await scan(ctx, postContent(event.post, event.author.name));
   },
 });
 
@@ -154,17 +174,7 @@ Devvit.addTrigger({
     if (!event.post || !event.author) return;
     if (event.post.spam || event.post.deleted) return;
     if ((event.post.selftext ?? "") === event.previousBody) return;
-    await scan(
-      ctx,
-      {
-        id: event.post.id,
-        kind: "post",
-        author: event.author.name,
-        title: event.post.title,
-        body: event.post.selftext ?? "",
-      },
-      { edited: true },
-    );
+    await scan(ctx, postContent(event.post, event.author.name), { edited: true });
   },
 });
 
@@ -203,15 +213,17 @@ async function contentFromTarget(ctx: Devvit.Context, targetId: string): Promise
     return { id: comment.id, kind: "comment", author: comment.authorName, body: comment.body };
   }
   const post = await ctx.reddit.getPostById(targetId);
-  const isLink = post.url && !post.url.includes(post.permalink);
-  return {
-    id: post.id,
-    kind: "post",
-    author: post.authorName,
-    title: post.title,
-    body: post.body ?? "",
-    ...(isLink ? { url: post.url } : {}),
-  };
+  return postContent(
+    {
+      id: post.id,
+      title: post.title,
+      selftext: post.body ?? "",
+      url: post.url,
+      permalink: post.permalink,
+      galleryImages: post.gallery.map((g) => g.url),
+    },
+    post.authorName,
+  );
 }
 
 function describeOutcome(outcome: ScanOutcome): string {
@@ -266,6 +278,125 @@ Devvit.addMenuItem({
       ? `Rule ${v.which_rule}, ${Math.round(v.confidence * 100)}% conf${entry.action === "removed" ? ", auto-removed" : entry.flagged ? "" : " (not flagged)"}`
       : `Clean, ${Math.round(v.confidence * 100)}% conf`;
     ctx.ui.showToast(`${head}: ${v.reasoning}`);
+  },
+});
+
+function pendingStore(ctx: TriggerContext): PendingStore {
+  return {
+    set: (k, v) => ctx.redis.set(k, v),
+    get: (k) => ctx.redis.get(k),
+    del: (k) => ctx.redis.del(k),
+    expire: (k, s) => ctx.redis.expire(k, s).then(() => true),
+  };
+}
+
+const removalForm = Devvit.createForm(
+  (data) => ({
+    title: "Remove with reason",
+    description: data.description as string,
+    acceptLabel: "Remove and reply",
+    fields: [
+      {
+        type: "select" as const,
+        name: "rule",
+        label: "Rule broken",
+        options: data.ruleOptions as Array<{ label: string; value: string }>,
+        defaultValue: data.defaultRule ? [data.defaultRule as string] : [],
+        required: true,
+      },
+      {
+        type: "paragraph" as const,
+        name: "message",
+        label: "Message to the author (posted as a distinguished mod reply)",
+        defaultValue: data.message as string,
+        required: true,
+      },
+      { type: "boolean" as const, name: "lock_reply", label: "Lock the reply", defaultValue: true },
+    ],
+  }),
+  async (event, ctx) => {
+    const values = event.values as { rule?: string[]; message?: string; lock_reply?: boolean };
+    const targetId = ctx.userId ? await takePendingRemoval(pendingStore(ctx), ctx.userId) : undefined;
+    if (!targetId) {
+      ctx.ui.showToast("That removal form expired. Open it again from the menu.");
+      return;
+    }
+    const deps = await scanDeps(ctx);
+    const config = await deps.loadConfig();
+    const entry = await getDecision(deps.kv, targetId);
+    const rule = resolveRule(config?.rules ?? [], values.rule?.[0], entry?.verdict.which_rule);
+    // Fill anything left as a placeholder when the form opened (the rule, and
+    // the explanation if there was no verdict to draft one from).
+    const text = renderRemovalMessage(values.message ?? "", { ...(rule ? { rule, reason: rule.description } : {}) });
+
+    const isPost = targetId.startsWith("t3_");
+    try {
+      await ctx.reddit.remove(targetId, false);
+      const reply = await ctx.reddit.submitComment({ id: targetId, text });
+      await reply.distinguish(isPost);
+      if (values.lock_reply) await reply.lock();
+    } catch (err) {
+      ctx.ui.showToast(`Removal failed: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    // The app account did the removal, which the ModAction trigger ignores,
+    // so record the mod's decision here.
+    await recordFeedbackFromModAction(deps.kv, targetId, isPost ? "removelink" : "removecomment");
+    ctx.ui.showToast("Removed and replied.");
+  },
+);
+
+Devvit.addMenuItem({
+  label: "ModSentinel: remove with reason",
+  description: "Remove this item and reply with a drafted removal message you can edit first",
+  location: ["post", "comment"],
+  forUserType: "moderator",
+  onPress: async (event, ctx) => {
+    if (!ctx.userId) return;
+    const deps = await scanDeps(ctx);
+    const config = await deps.loadConfig();
+    if (!config) {
+      ctx.ui.showToast("Finish ModSentinel setup first (API key and rules in app settings).");
+      return;
+    }
+    const content = await contentFromTarget(ctx, event.targetId);
+    const entry = await getDecision(deps.kv, event.targetId);
+    const rule = entry?.verdict.violates ? resolveRule(config.rules, undefined, entry.verdict.which_rule) : undefined;
+
+    // Draft the explanation with Claude when there's a verdict to go on;
+    // fall back to the rule text if that fails or the daily limit is used up.
+    let reason: string | undefined;
+    if (rule) {
+      reason = rule.description;
+      if (await tryConsumeCall(deps.counters, config.daily_call_limit)) {
+        try {
+          reason = await new ClaudeClassifier({
+            apiKey: (await ctx.settings.get<string>("claude_api_key")) ?? "",
+            model: config.llm_model,
+          }).draftRemovalReason({ rule, content, modNote: entry?.verdict.reasoning ?? "" });
+        } catch (err) {
+          console.error("[ModSentinel] removal draft failed:", err);
+        }
+      }
+    }
+
+    const message = renderRemovalMessage(config.removal_message_template, {
+      author: content.author,
+      kind: content.kind,
+      subreddit: config.subreddit,
+      ...(rule ? { rule } : {}),
+      ...(reason ? { reason } : {}),
+    });
+
+    await setPendingRemoval(pendingStore(ctx), ctx.userId, event.targetId);
+    ctx.ui.showForm(removalForm, {
+      description: entry?.verdict.violates
+        ? `ModSentinel: Rule ${entry.verdict.which_rule}, ${Math.round(entry.verdict.confidence * 100)}% — ${entry.verdict.reasoning}`.slice(0, 300)
+        : "ModSentinel didn't flag this item. Pick the rule it broke; the rule text fills any {reason}.",
+      ruleOptions: config.rules.map((r) => ({ label: `${r.index}. ${r.short_name}`.slice(0, 100), value: String(r.index) })),
+      defaultRule: rule ? String(rule.index) : "",
+      message,
+    });
   },
 });
 

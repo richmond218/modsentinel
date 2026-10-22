@@ -48,6 +48,9 @@ export async function scanContent(
 
   const config = await deps.loadConfig();
   if (!config) return skip("setup incomplete — add a Claude API key and rules in app settings");
+  if (!config.scan_images && content.imageUrls?.length) {
+    content = { ...content, imageUrls: [] };
+  }
 
   if (!options.force) {
     if (content.kind === "post" && !config.scan_posts) return skip("post scanning is off");

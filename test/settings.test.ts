@@ -7,7 +7,7 @@ import {
   validateThreshold,
   type SettingsKey,
 } from "../src/settings.js";
-import { MODEL_IDS, resolveModelId } from "../src/types.js";
+import { DEFAULT_REMOVAL_TEMPLATE, MODEL_IDS, resolveModelId } from "../src/types.js";
 import { parseExamplesFromPlainText, parseRulesFromPlainText } from "../src/rules/normalize.js";
 import { SAMPLE_RULES } from "./fixtures.js";
 
@@ -142,5 +142,28 @@ describe("auto-remove threshold", () => {
     expect(validateAutoRemoveThreshold(0)).toBeUndefined();
     expect(validateAutoRemoveThreshold(0.97)).toBeUndefined();
     expect(validateAutoRemoveThreshold(0.5)).toMatch(/0.9 to 1/);
+  });
+});
+
+describe("image and removal settings", () => {
+  it("default to scanning images and the built-in removal template", async () => {
+    const config = await loadConfig(
+      settings({ claude_api_key: "k", rules_text: RULES_TEXT, removal_message_template: "   " }),
+      "s",
+      parseRulesFromPlainText,
+      parseExamplesFromPlainText,
+    );
+    expect(config?.scan_images).toBe(true);
+    expect(config?.removal_message_template).toBe(DEFAULT_REMOVAL_TEMPLATE);
+  });
+
+  it("keeps a custom removal template", async () => {
+    const config = await loadConfig(
+      settings({ claude_api_key: "k", rules_text: RULES_TEXT, removal_message_template: "Removed: {rule_name}" }),
+      "s",
+      parseRulesFromPlainText,
+      parseExamplesFromPlainText,
+    );
+    expect(config?.removal_message_template).toBe("Removed: {rule_name}");
   });
 });

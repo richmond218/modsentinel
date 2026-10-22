@@ -29,7 +29,7 @@ export interface DecisionMeta {
  * Used to tell a real edit from a re-delivered or no-op update event.
  */
 export function contentHash(content: ContentItem): string {
-  const text = `${content.title ?? ""}\u0000${content.body}\u0000${content.url ?? ""}`;
+  const text = [content.title ?? "", content.body, content.url ?? "", ...(content.imageUrls ?? [])].join("\u0000");
   let h = 0x811c9dc5;
   for (let i = 0; i < text.length; i++) {
     h ^= text.charCodeAt(i);

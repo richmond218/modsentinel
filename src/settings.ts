@@ -11,7 +11,7 @@
 
 import { SettingScope } from "@devvit/public-api";
 import { parseUserList } from "./moderation/filters.js";
-import { DEFAULT_MODEL, resolveModelId, type SubredditConfig } from "./types.js";
+import { DEFAULT_MODEL, DEFAULT_REMOVAL_TEMPLATE, resolveModelId, type SubredditConfig } from "./types.js";
 
 export type SettingsKey =
   | "claude_api_key"
@@ -29,7 +29,9 @@ export type SettingsKey =
   | "auto_remove_threshold"
   | "add_mod_notes"
   | "rescan_edits"
-  | "weekly_report";
+  | "weekly_report"
+  | "scan_images"
+  | "removal_message_template";
 
 export interface DevvitSettingsAdapter {
   get<T = unknown>(key: SettingsKey): Promise<T | undefined>;
@@ -67,6 +69,8 @@ export async function loadConfig(
     addModNotes,
     rescanEdits,
     weeklyReport,
+    scanImages,
+    removalTemplate,
   ] = await Promise.all([
     settings.get<string>("claude_api_key"),
     settings.get<string>("rules_text"),
@@ -84,6 +88,8 @@ export async function loadConfig(
     settings.get<boolean>("add_mod_notes"),
     settings.get<boolean>("rescan_edits"),
     settings.get<boolean>("weekly_report"),
+    settings.get<boolean>("scan_images"),
+    settings.get<string>("removal_message_template"),
   ]);
 
   if (!claudeKey) return null;
@@ -122,6 +128,8 @@ export async function loadConfig(
     add_mod_notes: addModNotes ?? false,
     rescan_edits: rescanEdits ?? true,
     weekly_report: weeklyReport ?? true,
+    scan_images: scanImages ?? true,
+    removal_message_template: removalTemplate?.trim() ? removalTemplate : DEFAULT_REMOVAL_TEMPLATE,
   };
 }
 
@@ -263,6 +271,23 @@ export const SETTING_DEFINITIONS = [
     type: "boolean" as const,
     defaultValue: true,
     helpText: "Send the mod team a weekly modmail with accuracy, flags by rule, and tuning tips.",
+  },
+  {
+    name: "scan_images" as const,
+    label: "Scan images in posts",
+    type: "boolean" as const,
+    defaultValue: true,
+    helpText:
+      "Show image posts, galleries and image links (up to 4 images) to Claude, so rule breaks that are only in the image get caught. Image posts cost more to scan.",
+  },
+  {
+    name: "removal_message_template" as const,
+    label: "Removal message template",
+    type: "paragraph" as const,
+    required: false,
+    defaultValue: DEFAULT_REMOVAL_TEMPLATE,
+    helpText:
+      'Used by "ModSentinel: remove with reason". Placeholders: {author} {kind} {subreddit} {rule_number} {rule_name} {rule_description} {reason}. {reason} is an AI-drafted explanation you can edit before posting.',
   },
   {
     name: "skip_moderators" as const,

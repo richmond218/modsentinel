@@ -25,10 +25,10 @@ AutoMod helps with patterns you can spell out in regex, but every sub has rules 
    - Dry run on/off (default ON)
    - Daily scan limit (default 500 calls/day) to cap the API bill
    - Who to skip: moderators, approved users, and an exempt-users list
-   - Optional: auto-remove threshold (off by default), mod notes on flagged users, edit re-scanning (on), weekly report (on)
+   - Optional: auto-remove threshold (off by default), mod notes on flagged users, edit re-scanning (on), image scanning (on), weekly report (on), removal message template
 3. On every new post (and optional comment), ModSentinel:
    - Skips AutoModerator, its own account, mods/approved users/exempt users, near-empty content, and items it has already scanned
-   - Sends the content + the rules that apply to that kind of content + examples to Claude
+   - Sends the content (text, plus up to 4 images for image posts, galleries and image links) + the rules that apply to that kind of content + examples to Claude
    - Receives a schema-constrained verdict: `{ violates, which_rule, confidence, reasoning }`
    - If `violates && confidence >= threshold && !dry_run` → reports to mod queue with a short reason
    - If auto-remove is turned on and confidence is at or above its threshold (0.9-1.0) → removes the item and leaves a mod note saying why
@@ -44,9 +44,12 @@ From the `...` menu (mods only):
 |---|---|---|
 | Post / comment | **ModSentinel: scan now** | Classifies the item immediately, ignoring skip rules. Handy for testing your rules. |
 | Post / comment | **ModSentinel: why flagged?** | Shows the full verdict and reasoning for an item ModSentinel has scanned. |
+| Post / comment | **ModSentinel: remove with reason** | Opens a form with a removal message already drafted: your template, filled in with the rule and a short, polite explanation written by Claude. Edit it, pick the rule, and submit. The item is removed and the message is posted as a distinguished (and optionally locked) mod reply. |
 | Subreddit | **ModSentinel: stats** | Items scanned and flagged, precision, recall, estimated API cost over 14 days, and calls today. |
 
-### Edits, notes and the weekly report
+### Images, edits, notes and the weekly report
+
+- **Image posts are checked too.** Image posts, galleries and direct image links are sent to Claude alongside the text, so a rule break that is only in the picture (or in text inside it) still gets caught. If an image link can't be fetched, the post is judged on its text instead of being dropped. Image scanning can be turned off to save cost.
 
 - **Edited content is re-scanned.** A clean post edited into a spam link after its first scan gets classified again. Unchanged or already-flagged items aren't re-billed.
 - **Mod notes** (optional) put the rule and reasoning in the author's mod-notes history, so repeat behaviour is visible across items. Auto-removals always get a note.
@@ -68,7 +71,7 @@ ModSentinel watches mod actions. When a mod removes an item it flagged, that cou
 - **TypeScript** on the [Devvit](https://developers.reddit.com) platform (runs on Reddit's servers)
 - **Claude API** via `fetch` (Haiku 5.5 by default; Sonnet 5.5 / Opus 5.5 selectable), with structured outputs, `effort: "low"`, and prompt caching of the per-sub rules block
 - **Zod** for schema-validated parsing
-- **Vitest** with 127 unit tests (mocked Claude responses, in-memory Redis)
+- **Vitest** with 147 unit tests (mocked Claude responses, in-memory Redis)
 
 ## Project structure
 
@@ -78,8 +81,10 @@ src/
 ├── scan.ts                     # Devvit-agnostic pipeline: config → skip → budget → classify → flag → audit
 ├── types.ts                    # Zod schemas + model list: Rule, Example, Verdict, SubredditConfig, AuditEntry
 ├── settings.ts                 # Devvit settings schema, validators, loadConfig()
+├── content/
+│   └── images.ts               # Image URLs from image posts, galleries and image links
 ├── classifier/
-│   ├── claude.ts               # Claude Messages API client (structured outputs, caching, retries, refusals)
+│   ├── claude.ts               # Claude client: verdicts (structured outputs, caching, images, retries) + removal drafts
 │   ├── prompt.ts               # System prompt, cached policy block, escaped content block
 │   └── parser.ts               # JSON response parser + format coercion
 ├── rules/
@@ -88,6 +93,7 @@ src/
     ├── flag.ts                 # Report / remove / mod note; ≤100-char report reason, ≤250-char note
     ├── filters.ts              # Who/what to skip before spending an API call
     ├── budget.ts               # Daily call limit (Redis counter)
+    ├── removal.ts              # Removal-message templates and the pending-removal store
     ├── audit.ts                # Audit log, edit hashes, mod-action feedback, precision/recall/cost stats
     └── report.ts               # Weekly modmail report + tuning tips
 test/                           # One test file per module, plus scan.test.ts for the full pipeline
@@ -97,7 +103,7 @@ test/                           # One test file per module, plus scan.test.ts fo
 
 ```bash
 npm install
-npm test              # 127 tests, ~2s
+npm test              # 147 tests, ~2s
 npm run build         # tsc --noEmit
 npm run lint
 ```
@@ -122,12 +128,13 @@ Shipped since the hackathon build:
 - Skip lists, duplicate protection, daily spend cap
 - Automatic accuracy tracking from mod actions; scan-now / why-flagged / stats menu actions
 - Opt-in auto-remove for near-certain verdicts, mod notes, edit re-scanning, weekly modmail report
+- Image scanning; "remove with reason" with an AI-drafted, editable removal message
 
 Next up:
 
-1. Removal-reason drafting: suggest a removal message citing the rule when a mod removes a flagged item
-2. Image posts: send images to Claude so image-only rule breaks are caught
-3. A dashboard custom post showing per-sub precision over time
+1. A dashboard custom post showing per-sub precision over time
+2. Per-author history (repeat offenders) shown in "why flagged?" and the weekly report
+3. Modmail triage: classify incoming modmail by topic and urgency
 
 ## License
 
