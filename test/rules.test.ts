@@ -3,6 +3,8 @@ import {
   normalizeRulesFromRedditApi,
   parseRulesFromPlainText,
   truncateRules,
+  parseExamplesFromPlainText,
+  normalizeRulesFromDevvit,
 } from "../src/rules/normalize.js";
 
 describe("normalizeRulesFromRedditApi", () => {
@@ -91,5 +93,42 @@ describe("truncateRules", () => {
     const out = truncateRules(rules, 600);
     expect(out[0]?.description).toHaveLength(600);
     expect(out[0]?.description.endsWith("...")).toBe(true);
+  });
+});
+
+describe("parseExamplesFromPlainText", () => {
+  it("parses VIOLATES and CLEAN blocks with reasoning", () => {
+    const text = `[VIOLATES 1] You're all idiots.
+Direct insult.
+
+[CLEAN] How do I use asyncio.gather?
+On-topic question.
+
+[violates rule 2] Buy my course!!! link.example`;
+    const examples = parseExamplesFromPlainText(text);
+    expect(examples).toEqual([
+      { violates_rule: 1, content: "You're all idiots.", reasoning: "Direct insult." },
+      { violates_rule: null, content: "How do I use asyncio.gather?", reasoning: "On-topic question." },
+      { violates_rule: 2, content: "Buy my course!!! link.example", reasoning: "Example violation." },
+    ]);
+  });
+
+  it("ignores untagged or empty blocks", () => {
+    expect(parseExamplesFromPlainText("just some notes\n\n[CLEAN]\nno body")).toEqual([]);
+  });
+});
+
+describe("normalizeRulesFromDevvit", () => {
+  it("numbers rules by sidebar priority and maps rule kinds", () => {
+    const rules = normalizeRulesFromDevvit([
+      { shortName: "No spam", description: "No link drops.", kind: "link", priority: 1 },
+      { shortName: "Be civil", description: "", kind: "all", priority: 0 },
+      { shortName: "No low-effort replies", description: "Add something.", kind: "comment", priority: 2 },
+    ]);
+    expect(rules).toEqual([
+      { index: 1, short_name: "Be civil", description: "Be civil", applies_to: "all" },
+      { index: 2, short_name: "No spam", description: "No link drops.", applies_to: "post" },
+      { index: 3, short_name: "No low-effort replies", description: "Add something.", applies_to: "comment" },
+    ]);
   });
 });

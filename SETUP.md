@@ -94,7 +94,7 @@ This deploys ModSentinel to your test sub in dev mode and tails logs. Open anoth
 Now go to https://www.reddit.com/r/modsentinel_test and:
 1. Open ModSentinel settings (click your sub → "..." → "App settings")
 2. Paste your **Anthropic Claude API key** (get one at console.anthropic.com — should already be set up from your DAP work)
-3. Paste your **subreddit rules** in the format:
+3. **Subreddit rules**: leave the box empty to use your sub's rules from Reddit (add a couple of rules to the test sub first), or paste rules in the format:
    ```
    1. No personal attacks
    Don't insult or demean other users.

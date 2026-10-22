@@ -19,77 +19,122 @@ AutoMod helps with patterns you can spell out in regex, but every sub has rules 
 1. Mod installs ModSentinel on their subreddit via the Reddit App Directory.
 2. Mod configures it in app settings:
    - Anthropic Claude API key
-   - Subreddit rules (paste or auto-fetch)
-   - 3-5 example violations (improves accuracy)
+   - Subreddit rules — leave empty to use the sub's own rules from Reddit, or paste your own
+   - 3-5 example violations (optional, improves accuracy)
    - Confidence threshold (default 0.85)
    - Dry run on/off (default ON)
+   - Daily scan limit (default 500 calls/day) to cap the API bill
+   - Who to skip: moderators, approved users, and an exempt-users list
+   - Optional: auto-remove threshold (off by default), mod notes on flagged users, edit re-scanning (on), image scanning (on), weekly report (on), removal message template
 3. On every new post (and optional comment), ModSentinel:
-   - Sends the content + rules + examples to Claude
-   - Receives a typed verdict: `{ violates, which_rule, confidence, reasoning }`
-   - If `violates && confidence >= threshold && !dry_run` → reports to mod queue with reasoning attached
-   - Always logs the decision to a per-install audit store for later review
-4. Mods see flagged items in mod queue with a one-line reason like:
-   > `ModSentinel (Rule 1, 92% conf) — Calls users "morons" and dismisses anyone who agrees with them. Direct personal attack.`
+   - Skips AutoModerator, its own account, mods/approved users/exempt users, near-empty content, and items it has already scanned
+   - Sends the content (text, plus up to 4 images for image posts, galleries and image links) + the rules that apply to that kind of content + examples to Claude
+   - Receives a schema-constrained verdict: `{ violates, which_rule, confidence, reasoning }`
+   - If `violates && confidence >= threshold && !dry_run` → reports to mod queue with a short reason
+   - If auto-remove is turned on and confidence is at or above its threshold (0.9-1.0) → removes the item and leaves a mod note saying why
+   - Always logs the decision (with token usage) to a per-install audit store
+4. Mods see flagged items in mod queue with a one-line reason (Reddit caps report reasons at 100 characters):
+   > `ModSentinel R1 92%: Calls users "morons" and dismisses anyone who agrees with them.`
+
+### Mod tools
+
+From the `...` menu (mods only):
+
+| Where | Action | What it does |
+|---|---|---|
+| Post / comment | **ModSentinel: scan now** | Classifies the item immediately, ignoring skip rules. Handy for testing your rules. |
+| Post / comment | **ModSentinel: why flagged?** | Shows the full verdict and reasoning for an item ModSentinel has scanned. |
+| Post / comment | **ModSentinel: remove with reason** | Opens a form with a removal message already drafted: your template, filled in with the rule and a short, polite explanation written by Claude. Edit it, pick the rule, and submit. The item is removed and the message is posted as a distinguished (and optionally locked) mod reply. |
+| Subreddit | **ModSentinel: stats** | Items scanned and flagged, precision, recall, estimated API cost over 14 days, and calls today. |
+
+### Images, edits, notes and the weekly report
+
+- **Image posts are checked too.** Image posts, galleries and direct image links are sent to Claude alongside the text, so a rule break that is only in the picture (or in text inside it) still gets caught. If an image link can't be fetched, the post is judged on its text instead of being dropped. Image scanning can be turned off to save cost.
+
+- **Edited content is re-scanned.** A clean post edited into a spam link after its first scan gets classified again. Unchanged or already-flagged items aren't re-billed.
+- **Mod notes** (optional) put the rule and reasoning in the author's mod-notes history, so repeat behaviour is visible across items. Auto-removals always get a note.
+- **Weekly report** by modmail every Monday: volume, precision and recall, flags by rule, items mods overturned (good candidates for `[CLEAN]` examples), and plain-language tuning tips. For example, it suggests turning dry run off once dry-run precision stays above 90%.
+
+### Accuracy tracking without extra clicks
+
+ModSentinel watches mod actions. When a mod removes an item it flagged, that counts as a true positive; approving it counts as a false positive. Removing an item it *didn't* flag counts as a miss. Precision and recall in **stats** come from what mods actually do, with no rating step.
+
+### Safety
+
+- **Reports by default; removes only if you opt in.** Auto-remove is off unless a mod sets a threshold of 0.9 or higher. An out-of-range value turns it off rather than guessing. Dry run (on by default) overrides it. Approving an auto-removed item restores it and counts as a false positive. ModSentinel's own removals are never counted as mod feedback.
+- **Prompt-injection hardening.** Post text goes inside a `<user_content>` block, and any look-alike delimiter tags in the post are escaped so a post can't close the block early and pass itself off as instructions. The model is told to ignore instructions inside user content.
+- **Verdicts are checked.** Responses are schema-constrained JSON, validated again with Zod. A verdict that cites a rule number that doesn't exist is discarded. Refusals are treated as errors, never as verdicts.
+- **Bounded spend.** A daily call limit, duplicate-trigger protection, and an 8,000-character cap on post bodies.
 
 ## Tech
 
 - **TypeScript** on the [Devvit](https://developers.reddit.com) platform (runs on Reddit's servers)
-- **Claude API** (Haiku 4.5 by default, Sonnet 4.6 / Opus 4.7 selectable)
-- **Zod** for schema-validated parser
-- **Vitest** with 49 unit tests (mocked Claude responses)
+- **Claude API** via `fetch` (Haiku 5.5 by default; Sonnet 5.5 / Opus 5.5 selectable), with structured outputs, `effort: "low"`, and prompt caching of the per-sub rules block
+- **Zod** for schema-validated parsing
+- **Vitest** with 147 unit tests (mocked Claude responses, in-memory Redis)
 
 ## Project structure
 
 ```
 src/
-├── main.ts                     # Devvit entry — trigger registration + classify() orchestrator
-├── types.ts                    # Zod schemas: Rule, Example, Verdict, SubredditConfig, AuditEntry
-├── settings.ts                 # Devvit settings schema + loadConfig() reader
+├── main.ts                     # Devvit wiring — triggers (submit, update, ModAction, install), menu items, weekly job
+├── scan.ts                     # Devvit-agnostic pipeline: config → skip → budget → classify → flag → audit
+├── types.ts                    # Zod schemas + model list: Rule, Example, Verdict, SubredditConfig, AuditEntry
+├── settings.ts                 # Devvit settings schema, validators, loadConfig()
+├── content/
+│   └── images.ts               # Image URLs from image posts, galleries and image links
 ├── classifier/
-│   ├── claude.ts               # Claude Messages API client (fetch-based, no SDK dep)
-│   ├── prompt.ts               # System prompt + user prompt builder
+│   ├── claude.ts               # Claude client: verdicts (structured outputs, caching, images, retries) + removal drafts
+│   ├── prompt.ts               # System prompt, cached policy block, escaped content block
 │   └── parser.ts               # JSON response parser + format coercion
 ├── rules/
-│   └── normalize.ts            # Rules-text → Rule[] parser; truncation
+│   └── normalize.ts            # Rules/examples text parsers, Reddit rules → Rule[], truncation
 └── moderation/
-    ├── flag.ts                 # Decide whether to flag; build mod queue report reason
-    └── audit.ts                # Per-install audit log (Redis hash) with TP/FP feedback
-test/
-├── fixtures.ts                 # Realistic rules + sample posts (clean / each violation type / ambiguous / injection / off-topic)
-├── parser.test.ts              # 12 tests — JSON coercion, format variants, error modes
-├── classifier.test.ts          # 10 tests — happy path, retries, auth/server errors, prompt injection passthrough
-├── rules.test.ts               # 8 tests — Reddit API → Rule[], plain-text parsing, truncation
-├── prompt.test.ts              # 6 tests — prompt structure, content delimiting, schema presence
-├── flag.test.ts                # 7 tests — threshold gating, dry-run, mod queue reason building
-└── audit.test.ts               # 6 tests — record / read / mod feedback / precision stats
+    ├── flag.ts                 # Report / remove / mod note; ≤100-char report reason, ≤250-char note
+    ├── filters.ts              # Who/what to skip before spending an API call
+    ├── budget.ts               # Daily call limit (Redis counter)
+    ├── removal.ts              # Removal-message templates and the pending-removal store
+    ├── audit.ts                # Audit log, edit hashes, mod-action feedback, precision/recall/cost stats
+    └── report.ts               # Weekly modmail report + tuning tips
+test/                           # One test file per module, plus scan.test.ts for the full pipeline
 ```
 
 ## Testing
 
 ```bash
 npm install
-npm run test          # 49 tests, ~2s
+npm test              # 147 tests, ~2s
 npm run build         # tsc --noEmit
+npm run lint
 ```
 
-Tests use mocked `fetch` so they run with zero external dependencies. No Claude API key needed for CI.
+Tests use mocked `fetch` and an in-memory Redis stand-in, so they run with zero external dependencies. No Claude API key needed for CI. GitHub Actions runs lint, type-check and tests on every PR.
 
 ## Cost
 
-Each classification at Haiku 4.5 rates:
-- Input: ~600 tokens (rules + examples + content) → $0.0001
-- Output: ~80 tokens (JSON verdict) → $0.00004
-- **Total per post: ~$0.0002**
+Rough estimate per classification on Haiku 5.5 ($0.10 / $0.50 per million input/output tokens):
+- Rules + examples (~600 tokens): cached after the first call, billed at a tenth of the input rate
+- Post content (~200 tokens) + verdict and brief thinking at low effort (~200 output tokens)
+- **Total per post: roughly $0.0001**
 
-A subreddit with 30 modqueue items/day costs ~$0.006/day = $0.18/month. Even a 1M-member sub with 1000 posts/day is $6/month.
+A sub with 1,000 posts/day comes to roughly $3/month. The **stats** menu shows the real figure from logged token usage, and the daily scan limit caps the worst case.
 
 ## Status
 
-This is the hackathon submission build. After judging the plan is to:
+Shipped since the hackathon build:
 
-1. Ship a `Best Ported App` port (`automodmail` migrated to use Claude as the classifier backend)
-2. Add `RemoveContent` action with confidence-threshold ≥ 0.97 for the very-obvious cases (with mod-approval-required first install flow)
-3. Build a public dashboard custom-post type showing per-sub precision over time
+- Current Claude models, structured outputs, prompt caching
+- Auto-fetching the sub's rules, per-rule post/comment scoping
+- Skip lists, duplicate protection, daily spend cap
+- Automatic accuracy tracking from mod actions; scan-now / why-flagged / stats menu actions
+- Opt-in auto-remove for near-certain verdicts, mod notes, edit re-scanning, weekly modmail report
+- Image scanning; "remove with reason" with an AI-drafted, editable removal message
+
+Next up:
+
+1. A dashboard custom post showing per-sub precision over time
+2. Per-author history (repeat offenders) shown in "why flagged?" and the weekly report
+3. Modmail triage: classify incoming modmail by topic and urgency
 
 ## License
 
